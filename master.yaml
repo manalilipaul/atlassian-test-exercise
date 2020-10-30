@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+    Master Stack to create a Atlassian Jira
+    Initial
+    Paul Manalili - manalilipaul@gmail.com - 30/10/2020
+
+Parameters:
+
+  Environment:
+    Description: "Jira Environment"
+    Type: "String"
+    AllowedValues:
+      - "DEV"
+      - "QA"
+      - "PROD"
+
+  DomainJira:
+    Description: "Enter an sub domain prefix."
+    Type: "String"
+
+  DomainRDS:
+    Description: "Enter an sub domain prefix."
+    Type: "String"
+
+  DefaultIP:
+    Default: "0.0.0.0/0"
+    Description: "Update Default IP"
+    Type: "String"
+
+  EC2KeyPair:
+    Description: "Enter an existing EC2 KeyPair. Default is mk2acc-nv."
+    Type: AWS::EC2::KeyPair::KeyName
+
+  S3URL:
+    Default: "https://atlassian-technical-exercise-paulmanalili.s3-ap-southeast-1.amazonaws.com/infra"
+    Description: "Trying running from own directory/workstation."
+    Type: "String"
+
+  EC2JiraInstanceType:
+    Description: "Choose EC2 Jira Instance Type"
+    Type: "String"
+    Default: "t2.medium"
+    AllowedValues:
+      - "t2.medium"
+      - "m3.medium"
+      - "m4.large"
+      - "m4.xlarge"
+
+Mappings:
+  RegionMap:
+    ap-southeast-1:
+      AMI: "ami-4fffc834"
+      StorageType: "GLACIER"
+  EnvironmentMap:
+    DEV:
+      DBUser: "devadmin"
+      DBPassword: "devpassword"
+      DBName: "devatlassianjira"
+      DBSize: '5'
+      DBEngine: "mysql"
+      DBInstanceClass: "db.t2.micro"
+      VPCCIDR: 10.0.0.0/16
+      PublicSubnetCIDR: 10.0.1.0/24
+      PrivateSubnetCIDR: 10.0.2.0/24
+      DomainRDS: "dev-rds.paulmanalili.site"
+      DomainJira: "dev-jira.paulmanalili.site"
+    PROD:
+      DBUser: "prodadmin"
+      DBPassword: "prodpassword"
+      DBName: "prodatlassianjira"
+      DBSize: '5'
+      DBEngine: "mysql"
+      DBInstanceClass: "db.t2.medium"
+      VPCCIDR: 10.0.0.0/16
+      PublicSubnetCIDR: 10.0.1.0/24
+      PrivateSubnetCIDR: 10.0.2.0/24
+      DomainRDS: "prod-rds.paulmanalili.site"
+      DomainJira: "prod-jira.paulmanalili.site"
+
+Resources:
+
+  IAM:
+    Type: "AWS::CloudFormation::Stack"
+    Properties:
+      TemplateURL: !Sub "${S3URL}/iam.yaml"
+      Parameters:
+        Environment: !Ref "Environment"
+
+  S3:
+    Type: "AWS::CloudFormation::Stack"
+    Properties:
+      TemplateURL: !Sub "${S3URL}/s3.yaml"
+      Parameters:
+        Environment: !Ref "Environment"
+        StorageType: !FindInMap ["RegionMap", !Ref "AWS::Region", "StorageType"]
+
+  VPC:
+    Type: "AWS::CloudFormation::Stack"
+    DependsOn:
+    - "S3"
+    Properties:
+      TemplateURL: !Sub "${S3URL}/vpc.yaml"
+      Parameters:
+        Environment: !Ref "Environment"
+        VPCCIDR: !FindInMap ["EnvironmentMap", !Ref "Environment", "VPCCIDR"]
+        PublicSubnetCIDR:  !FindInMap ["EnvironmentMap", !Ref "Environment", "PublicSubnetCIDR"]
+        PrivateSubnetCIDR:  !FindInMap ["EnvironmentMap", !Ref "Environment", "PublicSubnetCIDR"]
+        VPCIAMRoleArn: !GetAtt "IAM.Outputs.VPCIAMRoleArn"
+
+  SecurityGroup:
+    Type: "AWS::CloudFormation::Stack"
+    DependsOn:
+    - "VPC"
+    Properties:
+      TemplateURL: !Sub "${S3URL}/securitygroup.yaml"
+      Parameters:
+        Environment: !Ref "Environment"
+        DefaultIP: !Ref "DefaultIP"
+        VPCCIDR: !FindInMap ["EnvironmentMap", !Ref "Environment", "VPCCIDR"]
+        VPC: !GetAtt "VPC.Outputs.VPC"
+        PublicNetworkACL: !GetAtt "VPC.Outputs.PublicNetworkACL"
+        PrivateNetworkACL: !GetAtt "VPC.Outputs.PrivateNetworkACL"
+
+  RDS:
+    Type: "AWS::CloudFormation::Stack"
+    DependsOn:
+    - "SecurityGroup"
+    Properties:
+      TemplateURL: !Sub "${S3URL}/rds.yaml"
+      TimeoutInMinutes: '5'
+      Parameters:
+        Environment: !Ref "Environment"
+        DBUser: !FindInMap ["EnvironmentMap", !Ref "Environment", "DBUser"]
+        DBPassword: !FindInMap ["EnvironmentMap", !Ref "Environment", "DBPassword"]
+        DBName: !FindInMap ["EnvironmentMap", !Ref "Environment", "DBName"]
+        DBSize: !FindInMap ["EnvironmentMap", !Ref "Environment", "DBSize"]
+        DBEngine: !FindInMap ["EnvironmentMap", !Ref "Environment", "DBEngine"]
+        DBInstanceClass: !FindInMap ["EnvironmentMap", !Ref "Environment", "DBInstanceClass"]
+        SecurityGroupJiraRDS: !GetAtt "SecurityGroup.Outputs.SecurityGroupJiraRDS"
+        PrivateSubnet: !GetAtt "VPC.Outputs.PrivateSubnet"
+        DomainRDS: !FindInMap ["EnvironmentMap", !Ref "Environment", "DomainRDS"]
+
+
+  ASGJira:
+    Type: "AWS::CloudFormation::Stack"
+    Properties:
+      TemplateURL: !Sub "${S3URL}/asg-jira.yaml"
+      Parameters:
+        Environment: !Ref "Environment"
+        EC2KeyPair: !Ref "EC2KeyPair"
+        EC2JiraInstanceType: !Ref "EC2JiraInstanceType"
+        RegionAMI: !FindInMap ["RegionMap", !Ref "AWS::Region", "AMI"]
+        SecurityGroupJiraEC2: !GetAtt "SecurityGroup.Outputs.SecurityGroupJiraEC2"
+        S3Backup: !GetAtt "S3.Outputs.S3Backup"
+        EC2InstanceIAMProfile: !GetAtt "IAM.Outputs.EC2InstanceIAMProfile"
+        PrivateSubnet: !GetAtt "VPC.Outputs.PrivateSubnet"
+        DomainJira: !FindInMap ["EnvironmentMap", !Ref "Environment", "DomainJira"]
+        PMAutoscaleMin: '1'
+        PMAutoscaleMax: '1'
+        PMAutoscaleDes: '1'
+
+  Route53:
+    Type: "AWS::CloudFormation::Stack"
+    DependsOn:
+    - "ASGJira"
+    Properties:
+      TemplateURL: !Sub "${S3URL}/route53.yaml"
+      Parameters:
+        DomainJira: !FindInMap ["EnvironmentMap", !Ref "Environment", "DomainJira"]
+
+Outputs:
+
+  Jiraserver:
+    Description: "Jira Server Site"
+    Value:
+      Fn::Join:
+        - ''
+        - - "https://"
+          - !Sub "${DomainJira}"
+          - "/"
+
+  RDSserver:
+    Description: "RDS EndPoint Domain"
+    Value:
+      Fn::Join:
+        - ''
+        - - !Sub "${DomainRDS}"
+          - ":3306"
